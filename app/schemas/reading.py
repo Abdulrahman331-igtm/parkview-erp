@@ -12,6 +12,10 @@ class ReadingBase(BaseModel):
 class ReadingCreate(ReadingBase):
     pass # meaning ReadingCreate is an exact copy of ReadingBase
 
+class ReadingUpdate(BaseModel):
+  kplc_reading: Optional[float] = None
+  water_reading: Optional[float] = None
+
 class Reading(ReadingBase):
     id: int
     reading_time: datetime
