@@ -4,6 +4,7 @@ from typing import List, Optional
 from datetime import date
 from app import models, schemas
 from app.api import deps
+from sqlalchemy import func
 
 router = APIRouter()
 
@@ -57,14 +58,10 @@ def update_expense(
             detail="Expense not found"
         )
     
-    if expense_in.category is not None:
-        expense.category = expense_in.category
-    if expense_in.description is not None:
-        expense.description = expense_in.description
-    if expense_in.amount is not None:
-        expense.amount = expense_in.amount
-    if expense_in.expense_date is not None:
-        expense.expense_date = expense_in.expense_date
+    update_data = expense_in.dict(exclude_unset=True)
+    
+    for key, value in update_data.items():
+        setattr(expense, key, value)
     
     db.add(expense)
     db.commit()
@@ -89,80 +86,65 @@ def delete_expense(
     db.commit()
     
 @router.get("/dashboard-summary")
-def get_expense_dashboard_summary(db: Session = Depends(deps.get_db)):
+def get_expenses_dashboard_summary(db: Session = Depends(deps.get_db)):
     """
-    Computes real-time analytical P&L totals and categorizations 
-    explicitly structured for the Expenses & Payouts dashboard UI workspace.
+    Assembles metric summaries for the Expenses workspace.
+    Strictly filters financial aggregates to ONLY include 'Paid' expenses.
     """
-    expenses = db.query(models.Expense).all()
+    
+    # 1. 🛠️ THE MATH FIX: Create a base query that ONLY looks at "Paid" statuses
+    paid_query = db.query(models.Expense).filter(models.Expense.status == "Paid")
 
-    # 1. Initialize counters matching UI top cards summary metrics
-    total_expenses_sum = 0
-    salaries_wages_sum = 0
-    procurement_sum = 0
-    director_payouts_sum = 0
+    # Calculate Top Cards based strictly on paid outflows
+    total_expenses = paid_query.with_entities(func.sum(models.Expense.amount)).scalar() or 0
+    
+    salaries_wages = paid_query.filter(
+        models.Expense.category.in_(["Salary", "Wage"])
+    ).with_entities(func.sum(models.Expense.amount)).scalar() or 0
+    
+    procurement = paid_query.filter(
+        models.Expense.category == "Procurement"
+    ).with_entities(func.sum(models.Expense.amount)).scalar() or 0
+    
+    director_payouts = paid_query.filter(
+        models.Expense.category == "Director Payout"
+    ).with_entities(func.sum(models.Expense.amount)).scalar() or 0
 
-    # Categorized register mapping for P&L worksheet output
-    pl_categories = {
-        "Salary": 0,
-        "Wage": 0,
-        "Procurement": 0,
-        "Legal": 0,
-        "Land Rent": 0,
-        "Director Payout": 0
-    }
+    # Calculate P&L Summary (Grouped strictly by Paid)
+    pl_groups = db.query(
+        models.Expense.category, 
+        func.sum(models.Expense.amount)
+    ).filter(
+        models.Expense.status == "Paid"
+    ).group_by(models.Expense.category).all()
+    
+    pl_summary = [{"name": cat, "amount": float(amt)} for cat, amt in pl_groups]
 
+    # 2. THE DISPLAY FIX: Fetch ALL expenses for the data grid table so admins can see Pending/Overdue records
+    all_expenses = db.query(models.Expense).order_by(models.Expense.expense_date.desc()).all()
+    
     table_rows = []
-
-    # 2. Iterate through data to compile metrics loops
-    for e in expenses:
-        amt = int(e.amount)
-        cat = e.category
-        total_expenses_sum += amt
-
-        # Mapping variations into P&L registry blocks safely
-        if cat in ["Salary", "Wage"]:
-            salaries_wages_sum += amt
-        elif cat == "Procurement":
-            procurement_sum += amt
-        elif cat == "Director Payout":
-            director_payouts_sum += amt
-
-        # Track category summation counters for P&L list view
-        if cat in pl_categories:
-            pl_categories[cat] += amt
-        else:
-            pl_categories[cat] = amt
-
+    for e in all_expenses:
         table_rows.append({
             "id": e.id,
-            "expense_code": f"E-{100 + e.id:03d}", # Format: E-002
-            "category": cat,
+            "expense_code": f"EXP-{e.id:03d}",
+            "category": e.category,
             "description": e.description,
-            "amount": amt,
+            "amount": float(e.amount),
             "date": e.expense_date.strftime("%Y-%m-%d") if hasattr(e.expense_date, 'strftime') else str(e.expense_date),
-            "recurring": "Monthly" if getattr(e, 'is_recurring', False) else "One-Time",
-            "is_recurring_bool": getattr(e, 'is_recurring', False),
-            "approved_by": getattr(e, 'approved_by', "Admin")
+            "recurring": "Yes" if e.is_recurring else "No",
+            "approved_by": e.approved_by,
+            # 🛠️ MISSING LINK: Send the explicit status state to React!
+            "status": e.status 
         })
-
-    # Format localized Profit and Loss structure response shape matches mockup requirements
-    pl_summary_list = [
-        {"name": "Salaries", "amount": pl_categories["Salary"]},
-        {"name": "Wages", "amount": pl_categories["Wage"]},
-        {"name": "Procurement", "amount": pl_categories["Procurement"]},
-        {"name": "Legal", "amount": pl_categories["Legal"]},
-        {"name": "Land Rent", "amount": pl_categories["Land Rent"]},
-        {"name": "Director Payouts", "amount": pl_categories["Director Payout"]},
-    ]
 
     return {
         "summary": {
-            "total_expenses": total_expenses_sum,
-            "salaries_wages": salaries_wages_sum,
-            "procurement": procurement_sum,
-            "director_payouts": director_payouts_sum
+            "total_expenses": float(total_expenses),
+            "salaries_wages": float(salaries_wages),
+            "procurement": float(procurement),
+            "director_payouts": float(director_payouts)
         },
-        "expenses": table_rows,
-        "pl_summary": pl_summary_list
+        "pl_summary": pl_summary,
+        "expenses": table_rows
     }

@@ -14,6 +14,13 @@ def get_invoice_dashboard_summary(db: Session = Depends(deps.get_db)):
     Assembles relational metrics across Invoices, Tenants, Bookings, 
     and Units to power the PropManager Billing workspace engine.
     """
+    
+    db.query(models.Invoice).filter(
+        models.Invoice.status == "Pending",
+        models.Invoice.due_date < date.today()
+    ).update({"status": "Overdue"}, synchronize_session=False)
+    db.commit()
+    
     invoices = db.query(models.Invoice).all()
     active_units = db.query(models.Unit).filter(models.Unit.is_active == True).all()
     tenants = db.query(models.Tenant).all()
@@ -77,9 +84,34 @@ def get_invoice_dashboard_summary(db: Session = Depends(deps.get_db)):
     # Pack simplified dropdown fields arrays to seed our modal creation workflows selector forms
     recipient_options = []
     for t in tenants:
-        recipient_options.append({"id": t.id, "type": "Tenant", "label": f"{t.name} — Current Leased Unit"})
+        active_lease = db.query(models.Lease).filter(
+            models.Lease.tenant_id == t.id, 
+            models.Lease.status == "Active"
+        ).first()
+        
+        assigned_unit_no = ""
+        if active_lease:
+            db_unit = db.query(models.Unit).filter(models.Unit.id == active_lease.unit_id).first()
+            if db_unit:
+                assigned_unit_no = db_unit.unit_number
+                
+        recipient_options.append({
+            "id": t.id, 
+            "type": "Tenant", 
+            "label": f"{t.name} — Current Leased Unit",
+            "unit_number": assigned_unit_no 
+        })
+        
     for b in bookings:
-        recipient_options.append({"id": b.id, "type": "Guest", "label": f"{b.guest_name} — Room #{b.unit_id}"})
+        db_unit = db.query(models.Unit).filter(models.Unit.id == b.unit_id).first()
+        assigned_unit_no = db_unit.unit_number if db_unit else ""
+        
+        recipient_options.append({
+            "id": b.id, 
+            "type": "Guest", 
+            "label": f"{b.guest_name} — Room #{assigned_unit_no}",
+            "unit_number": assigned_unit_no
+        })
 
     unit_options = [{"id": u.id, "label": f"{u.unit_number} — {u.floor} {u.unit_type}"} for u in active_units]
 
