@@ -39,7 +39,7 @@ def create_payment(
     total_paid = db.query(models.Payment).filter(
         models.Payment.invoice_id == payment_in.invoice_id
     ).all()
-    
+     
     total_amount = sum(p.amount_paid for p in total_paid) + payment_in.amount_paid
     if total_amount >= invoice.amount:
         invoice.status = "Paid"
@@ -47,6 +47,13 @@ def create_payment(
         invoice.status = "Pending"
     
     db.add(invoice)
+    
+    if invoice.tenant_id:
+        tenant = db.query(models.Tenant).filter(models.Tenant.id == invoice.tenant_id).first()
+        if tenant:
+            current_balance = float(tenant.account_balance or 0.00)
+            tenant.account_balance = current_balance - float(payment_in.amount_paid)
+    
     db.commit()
     db.refresh(new_payment)
     return new_payment

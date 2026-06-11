@@ -5,6 +5,7 @@ from sqlalchemy import func
 from app import models
 from app.api import deps
 from datetime import date, datetime
+from collections import defaultdict
 
 router = APIRouter()
 
@@ -13,6 +14,7 @@ def generate_financial_report(
     type: str = Query(..., description="Report Type: Profit and Loss, AR Ageing Summary, Balance Sheet"),
     start_date: date = Query(None),
     end_date: date = Query(None),
+    accounting_method: str = Query("Cash", description="Cash oor Accrual"),
     db: Session = Depends(deps.get_db)
 ):
     """Compiles structured datasets for PDF financial report rendering."""
@@ -20,31 +22,55 @@ def generate_financial_report(
     if type == "Profit and Loss":
         if not start_date or not end_date:
             raise HTTPException(status_code=400, detail="Start and End dates are required for P&L")
-            
-        # INCOME: Sum of all Paid invoices grouped by category
-        income_groups = db.query(
-            models.Invoice.category, func.sum(models.Invoice.amount)
-        ).filter(
-            models.Invoice.status == "Paid",
-            models.Invoice.due_date.between(start_date, end_date)
-        ).group_by(models.Invoice.category).all()
         
-        income_data = [{"account": cat, "amount": float(amt)} for cat, amt in income_groups]
-        total_income = sum([item["amount"] for item in income_data])
+        if accounting_method == "Accrual":
+            invoices = db.query(models.Invoice).filter(
+                models.Invoice.due_date >= start_date,
+                models.Invoice.due_date <= end_date
+            ).all()
+            
+            expenses = db.query(models.Expense.category, models.Expense.amount).filter(
+                models.Expense.expense_date >= start_date,
+                models.Expense.expense_date <= end_date
+            ).all()
+        else: 
+            invoices = db.query(models.Invoice).filter(
+                models.Invoice.status == "Paid",
+                models.Invoice.due_date >= start_date,
+                models.Invoice.due_date <= end_date
+            ).all()
+            
+            expenses = db.query(models.Expense.category, models.Expense.amount).filter(
+                models.Expense.status == "Paid",
+                models.Expense.expense_date >= start_date,
+                models.Expense.expense_date <= end_date
+            ).all()
+            
+        
+        income_dict = defaultdict(float)
+            
+        for inv in invoices:
+            if getattr(inv, 'line_items', None) and isinstance(inv.line_items, dict):
+                for item_name, item_amt in inv.line_items.items():
+                    income_dict[item_name] += float(item_amt)
+            else:
+                cat_name = inv.category if inv.category else "General Revenue"
+                income_dict[cat_name] += float(inv.amount)
+            
+        income_data = [{"account": k, "amount": v} for k, v in income_dict.items()]
+        total_income = sum(v for v in income_dict.values())
+        
+        
+        expense_dict = defaultdict(float)
+        for cat, amt in expenses:
+            cat_name = cat if cat else "Uncategorized Expense"
+            expense_dict[cat_name] += float(amt)
 
-        # EXPENSES: Strictly accounting for 'Paid' outflows in the P&L summary
-        expense_groups = db.query(
-            models.Expense.category, func.sum(models.Expense.amount)
-        ).filter(
-            models.Expense.status == "Paid",
-            models.Expense.expense_date.between(start_date, end_date)
-        ).group_by(models.Expense.category).all()
-
-        expense_data = [{"account": cat, "amount": float(amt)} for cat, amt in expense_groups]
-        total_expenses = sum([item["amount"] for item in expense_data])
-
+        expense_data = [{"account": k, "amount": v} for k, v in expense_dict.items()]
+        total_expenses = sum(v for v in expense_dict.values())
+        
         return {
-            "report": "Profit and Loss",
+            "report": f"Profit and Loss ({accounting_method} Basis)",
             "period": f"{start_date.strftime('%B %d, %Y')} - {end_date.strftime('%B %d, %Y')}",
             "data": {
                 "income": income_data,

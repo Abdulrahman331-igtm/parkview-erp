@@ -5,6 +5,8 @@ from typing import List, Optional
 from app import models, schemas
 from app.api import deps
 from datetime import date, datetime
+import calendar
+from dateutil.relativedelta import relativedelta
 
 router = APIRouter()
 
@@ -76,7 +78,8 @@ def get_invoice_dashboard_summary(db: Session = Depends(deps.get_db)):
             "amount": amt,
             "due_date": inv.due_date.strftime("%Y-%m-%d") if hasattr(inv.due_date, 'strftime') else str(inv.due_date),
             "status": stat,
-            "line_items": inv.line_items or {}
+            "line_items": inv.line_items or {},
+            "previous_balance": float(inv.previous_balance) if hasattr(inv, "previous_balance") and inv.previous_balance else 0.00
         })
         
         table_rows.sort(key=lambda x: x["due_date"], reverse=True)
@@ -114,7 +117,7 @@ def get_invoice_dashboard_summary(db: Session = Depends(deps.get_db)):
         })
 
     unit_options = [{"id": u.id, "label": f"{u.unit_number} — {u.floor} {u.unit_type}"} for u in active_units]
-
+ 
     return {
         "summary": {
             "total_invoices": total_invoices_count,
@@ -137,36 +140,23 @@ def create_invoice(
 ):
     """Generate a new invoice (Rent, Utility, or Service)."""
     # Verify tenant or booking exists (one must be provided)
+    tenant = None
+    previous_bal = 0.00
+    
     if invoice_in.tenant_id:
         tenant = db.query(models.Tenant).filter(models.Tenant.id == invoice_in.tenant_id).first()
-        if not tenant:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Tenant not found"
-            )
-    elif invoice_in.booking_id:
-        booking = db.query(models.Booking).filter(models.Booking.id == invoice_in.booking_id).first()
-        if not booking:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Booking not found"
-            )
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Either tenant_id or booking_id must be provided"
-        )
+        if tenant:
+            previous_bal = float(tenant.account_balance or 0.00)
+    new_invoice_data = invoice_in.dict()
+    new_invoice_data["previous_balance"] = previous_bal
     
-    # Verify unit exists
-    unit = db.query(models.Unit).filter(models.Unit.id == invoice_in.unit_id).first()
-    if not unit:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Unit not found"
-        )
-    
-    new_invoice = models.Invoice(**invoice_in.dict())
+    new_invoice = models.Invoice(**new_invoice_data)
     db.add(new_invoice)
+    
+    if tenant:
+        tenant.account_balance = float(tenant.account_balance or 0) + float(invoice_in.amount)
+        db.add(tenant)
+        
     db.commit()
     db.refresh(new_invoice)
     return new_invoice
@@ -192,54 +182,6 @@ def get_invoices(
         query = query.filter(models.Invoice.tenant_id == tenant_id)
     
     return query.offset(skip).limit(limit).all()
-
-# UPDATE - Update invoice details
-# @router.put("/{invoice_id}", response_model=schemas.InvoiceRead)
-# def update_invoice(
-#     invoice_id: int,
-#     invoice_in: schemas.InvoiceUpdate,
-#     db: Session = Depends(deps.get_db),
-# ):
-#     """Update invoice details or adjust amounts."""
-#     invoice = db.query(models.Invoice).filter(models.Invoice.id == invoice_id).first()
-#     if not invoice:
-#         raise HTTPException(
-#             status_code=status.HTTP_404_NOT_FOUND,
-#             detail="Invoice not found"
-#         )
-    
-#     # Validate updates
-#     if invoice_in.tenant_id is not None:
-#         tenant = db.query(models.Tenant).filter(models.Tenant.id == invoice_in.tenant_id).first()
-#         if not tenant:
-#             raise HTTPException(
-#                 status_code=status.HTTP_404_NOT_FOUND,
-#                 detail="Tenant not found"
-#             )
-#         invoice.tenant_id = invoice_in.tenant_id
-    
-#     if invoice_in.booking_id is not None:
-#         booking = db.query(models.Booking).filter(models.Booking.id == invoice_in.booking_id).first()
-#         if not booking:
-#             raise HTTPException(
-#                 status_code=status.HTTP_404_NOT_FOUND,
-#                 detail="Booking not found"
-#             )
-#         invoice.booking_id = invoice_in.booking_id
-    
-#     if invoice_in.amount is not None:
-#         invoice.amount = invoice_in.amount
-#     if invoice_in.due_date is not None:
-#         invoice.due_date = invoice_in.due_date
-#     if invoice_in.status is not None:
-#         invoice.status = invoice_in.status
-#     if invoice_in.category is not None:
-#         invoice.category = invoice_in.category
-    
-#     db.add(invoice)
-#     db.commit()
-#     db.refresh(invoice)
-#     return invoice
 
 @router.put("/{invoice_id}", response_model=schemas.InvoiceRead)
 def update_invoice_status(invoice_id: int, invoice_in: schemas.InvoiceUpdate, db: Session = Depends(deps.get_db)):
@@ -352,3 +294,57 @@ def get_easyinvoice_formatted_data(invoice_id: int, db: Session = Depends(deps.g
             "locale": "en-US"
         }
     }
+    
+@router.post("/batch-generate")
+def batch_generate_monthly_invoices(db: Session = Depends(deps.get_db)):
+    """Automatically generates rent invoices for all active tenants for the upcoming month."""
+    
+    # Target next month
+    today = date.today()
+    next_month_date = today + relativedelta(months=1)
+    target_month = next_month_date.month
+    target_year = next_month_date.year
+    
+    # Calculate due date (e.g., 5th of next month)
+    due_date = date(target_year, target_month, 5)
+    
+    # Find all active leases
+    active_leases = db.query(models.Lease).filter(models.Lease.status == "Active").all()
+    
+    generated_count = 0
+    for lease in active_leases:
+        # Prevent duplicates: Check if we already billed this tenant for this specific month
+        existing_invoice = db.query(models.Invoice).filter(
+            models.Invoice.tenant_id == lease.tenant_id,
+            models.Invoice.category == "Rent",
+            func.extract('month', models.Invoice.due_date) == target_month,
+            func.extract('year', models.Invoice.due_date) == target_year
+        ).first()
+        
+        if not existing_invoice:
+            # Snapshot balance
+            tenant = db.query(models.Tenant).filter(models.Tenant.id == lease.tenant_id).first()
+            previous_bal = float(tenant.account_balance or 0.00) if tenant else 0.00
+            
+            # Create the Invoice
+            new_invoice = models.Invoice(
+                tenant_id=lease.tenant_id,
+                unit_id=lease.unit_id,
+                category="Rent",
+                amount=lease.monthly_rent,
+                due_date=due_date,
+                status="Pending",
+                previous_balance=previous_bal,
+                line_items={"Rent": float(lease.monthly_rent)}
+            )
+            db.add(new_invoice)
+            
+            # Update ledger
+            if tenant:
+                tenant.account_balance = previous_bal + float(lease.monthly_rent)
+                db.add(tenant)
+                
+            generated_count += 1
+
+    db.commit()
+    return {"message": f"Successfully generated {generated_count} invoices for {due_date.strftime('%B %Y')}"}

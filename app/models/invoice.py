@@ -14,6 +14,7 @@ class Invoice(Base):
     due_date = Column(Date, nullable=False)
     status = Column(String, default="Pending")
     line_items = Column(JSON, default=dict)
+    previous_balance = Column(Numeric(precision=12, scale=2), default=0.00)
 
     tenant = relationship("Tenant", back_populates="invoices")
     booking = relationship("Booking", back_populates="invoices")
