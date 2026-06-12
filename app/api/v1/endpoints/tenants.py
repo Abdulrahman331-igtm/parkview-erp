@@ -1,34 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
+from sqlalchemy.sql import func
 from app import models, schemas
 from app.api import deps
 
 router = APIRouter()
-
-# CREATE - Register a new tenant
-@router.post("/", response_model=schemas.TenantRead)
-def create_tenant(
-    tenant_in: schemas.TenantCreate,
-    db: Session = Depends(deps.get_db),
-):
-    """Register a new long-term tenant."""
-    # Check if email already exists (if provided)
-    if tenant_in.email:
-        existing_tenant = db.query(models.Tenant).filter(
-            models.Tenant.email == tenant_in.email
-        ).first()
-        if existing_tenant:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Email already registered"
-            )
-    
-    new_tenant = models.Tenant(**tenant_in.dict())
-    db.add(new_tenant)
-    db.commit()
-    db.refresh(new_tenant)
-    return new_tenant
 
 # READ - List all tenants
 @router.get("/", response_model=List[schemas.TenantRead])
@@ -81,8 +58,11 @@ def delete_tenant(
     
     db.delete(tenant)
     db.commit()
+    return None
     
     
+from sqlalchemy.sql import func # Add this import at the top of your file if not present
+
 @router.get("/dashboard-summary")
 def get_tenant_dashboard_summary(db: Session = Depends(deps.get_db)):
     """
@@ -92,7 +72,6 @@ def get_tenant_dashboard_summary(db: Session = Depends(deps.get_db)):
     tenants = db.query(models.Tenant).all()
     active_units = db.query(models.Unit).filter(models.Unit.is_active == True).all()
 
-    # 1. Initialize summary baseline metrics
     total_tenants = len(tenants)
     retail_count = 0
     office_count = 0
@@ -100,54 +79,75 @@ def get_tenant_dashboard_summary(db: Session = Depends(deps.get_db)):
 
     table_rows = []
 
-    # 2. Iterate through tenants to build full UI profiles
     for t in tenants:
-        # Resolve their active lease agreement (ignoring historical closed ones)
-        active_lease = next((l for l in t.leases if getattr(l, 'status', 'Active') == 'Active'), None)
+        # 1. Fetch ALL active lease agreements for this tenant
+        active_leases = [l for l in t.leases if getattr(l, 'status', 'Active') == 'Active']
         
-        unit_number = "—"
-        lease_period = "No Active Lease"
-        monthly_rent = 0
-        tenant_type = "Retail"  # Fallback default type
+        # 2. Compute dynamic combined calculations
+        tenant_monthly_rent = 0
+        assigned_unit_numbers = []
+        lease_periods = []
+        tenant_type = "Retail" # Fallback default
+        
+        # Track timeline boundaries for multi-unit leases
+        earliest_start = None
+        latest_end = None
 
-        if active_lease:
-            # Query the linked unit if relationship mapping isn't eager loaded
-            db_unit = db.query(models.Unit).filter(models.Unit.id == active_lease.unit_id).first()
-            if db_unit:
-                unit_number = db_unit.unit_number
-                # Assign type dynamically based on structural destination matching requirements
-                tenant_type = "Office" if db_unit.unit_type == "Office" else "Retail"
+        if active_leases:
+            for lease in active_leases:
+                # Add up rents mathematically
+                lease_rent = int(lease.monthly_rent or 0)
+                tenant_monthly_rent += lease_rent
+                total_monthly_rent_roll += lease_rent
 
-            # Parse structural dates cleanly
-            start_str = active_lease.start_date.strftime("%Y-%m-%d") if hasattr(active_lease.start_date, 'strftime') else str(active_lease.start_date)
-            end_str = active_lease.end_date.strftime("%Y-%m-%d") if hasattr(active_lease.end_date, 'strftime') else str(active_lease.end_date)
-            lease_period = f"{start_str} to {end_str}"
-            
-            monthly_rent = int(active_lease.monthly_rent or 0)
-            total_monthly_rent_roll += monthly_rent
+                # Find the units tied to these leases
+                db_unit = db.query(models.Unit).filter(models.Unit.id == lease.unit_id).first()
+                if db_unit:
+                    assigned_unit_numbers.append(db_unit.unit_number)
+                    if db_unit.unit_type == "Office":
+                        tenant_type = "Office"
 
-        # Update category counts
+                # Track timeline dates
+                if lease.start_date:
+                    if not earliest_start or lease.start_date < earliest_start:
+                        earliest_start = lease.start_date
+                if lease.end_date:
+                    if not latest_end or lease.end_date > latest_end:
+                        latest_end = lease.end_date
+
+            # Build readable display representations
+            unit_number_display = ", ".join(sorted(assigned_unit_numbers)) if assigned_unit_numbers else "—"
+            start_str = earliest_start.strftime("%Y-%m-%d") if earliest_start else "—"
+            end_str = latest_end.strftime("%Y-%m-%d") if latest_end else "—"
+            lease_period_display = f"{start_str} to {end_str}"
+        else:
+            unit_number_display = "—"
+            lease_period_display = "No Active Lease"
+
+        # Update metadata category counts
         if tenant_type == "Office":
             office_count += 1
         else:
             retail_count += 1
 
+        # Fallback fields for schema validation requirements
+        primary_lease = active_leases[0] if active_leases else None
+
         table_rows.append({
             "id": t.id,
-            "tenant_code": f"T-{100 + t.id:03d}", # Matches mock format: T-001
+            "tenant_code": f"T-{100 + t.id:03d}",
             "name": t.name,
             "type": tenant_type,
-            "unit_number": unit_number,
-            "unit_id": active_lease.unit_id if active_lease else None,
+            "unit_number": unit_number_display, # Now displays all units grouped together e.g. "206, 207..."
+            "unit_id": primary_lease.unit_id if primary_lease else None,
             "contact_phone": t.contact_phone or "—",
             "email": t.email or "—",
-            "lease_period": lease_period,
-            "monthly_rent": monthly_rent,
-            "lease_start": active_lease.start_date.strftime("%Y-%m-%d") if active_lease and hasattr(active_lease.start_date, 'strftime') else "",
-            "lease_end": active_lease.end_date.strftime("%Y-%m-%d") if active_lease and hasattr(active_lease.end_date, 'strftime') else ""
+            "lease_period": lease_period_display,
+            "monthly_rent": tenant_monthly_rent, # Now returns the accurate aggregate sum!
+            "lease_start": earliest_start.strftime("%Y-%m-%d") if earliest_start else "",
+            "lease_end": latest_end.strftime("%Y-%m-%d") if latest_end else ""
         })
 
-    # Assemble simple selection array for your "Assign Unit" dropdown field menu
     available_units = [
         {"id": u.id, "label": f"{u.unit_number} — {u.floor} {u.unit_type}"} 
         for u in active_units if u.status == "Vacant"

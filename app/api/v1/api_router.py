@@ -1,6 +1,6 @@
 #Combines all module routers
 from fastapi import APIRouter
-from app.api.v1.endpoints import units, readings, auth, dashboard, tenants, leases, invoices, payments, expenses, bookings, reports
+from app.api.v1.endpoints import units, readings, auth, dashboard, tenants, leases, invoices, payments, expenses, bookings, reports, director
 
 api_router = APIRouter()
 
@@ -14,4 +14,5 @@ api_router.include_router(invoices.router, prefix="/invoices", tags=["invoices"]
 api_router.include_router(payments.router, prefix="/payments", tags=["payments"])
 api_router.include_router(expenses.router, prefix="/expenses", tags=["expenses"])
 api_router.include_router(bookings.router, prefix="/bookings", tags=["bookings"])
+api_router.include_router(director.router, prefix="/director", tags=["Director Dashboard"])
 api_router.include_router(auth.router, prefix="", tags=["Authentication"])

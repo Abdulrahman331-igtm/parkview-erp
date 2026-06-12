@@ -20,19 +20,6 @@ def get_db() -> Generator:
     finally:
       db.close()
       
-# def get_current_user_role(
-#   token: str = Security(oauth2_scheme)
-# ) -> TokenPayload:
-#   try:
-#     payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-#     username: str = payload.get("sub")
-#     role: str = payload.get(role)
-#     if username is None or role is None:
-#       raise HTTPException(status_code=403, detail="Invalid token claims")
-#     return TokenPayload(sub=username, role=role)
-#   except:
-#     raise HTTPException(status_code=401, detail="Could not validate credentials")
-  
 async def get_current_user(token: str = Security(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

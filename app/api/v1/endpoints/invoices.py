@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, func
 from typing import List, Optional
 from app import models, schemas
 from app.api import deps
@@ -87,22 +87,26 @@ def get_invoice_dashboard_summary(db: Session = Depends(deps.get_db)):
     # Pack simplified dropdown fields arrays to seed our modal creation workflows selector forms
     recipient_options = []
     for t in tenants:
-        active_lease = db.query(models.Lease).filter(
+        active_leases = db.query(models.Lease).filter(
             models.Lease.tenant_id == t.id, 
             models.Lease.status == "Active"
-        ).first()
+        ).all()
         
-        assigned_unit_no = ""
-        if active_lease:
-            db_unit = db.query(models.Unit).filter(models.Unit.id == active_lease.unit_id).first()
-            if db_unit:
-                assigned_unit_no = db_unit.unit_number
+        assigned_unit_numbers = []
+        
+        if active_leases:
+            for lease in active_leases:
+                db_unit = db.query(models.Unit).filter(models.Unit.id == lease.unit_id).first()
+                if db_unit:
+                    assigned_unit_numbers.append(db_unit.unit_number)
+        
+        assigned_unit_no_string = ", ".join(sorted(assigned_unit_numbers)) if assigned_unit_numbers else ""
                 
         recipient_options.append({
             "id": t.id, 
             "type": "Tenant", 
             "label": f"{t.name} — Current Leased Unit",
-            "unit_number": assigned_unit_no 
+            "unit_number": assigned_unit_no_string 
         })
         
     for b in bookings:
