@@ -14,8 +14,6 @@ class Reading(Base):
     kplc_reading = Column(Numeric(precision=12, scale=2), nullable=True)
     water_reading = Column(Numeric(precision=12, scale=2), nullable=True)
     
-    bill_photo_url = Column(String, nullable=True)
-    
     reading_time = Column(DateTime(timezone=True), server_default=func.now())
     
     

@@ -1,109 +1,77 @@
-from typing import List
-from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import func
-
+from app import models, schemas
+from app.api import deps
 from app.api.deps import get_db
-from app.models.director import PayoutRequest, Invoice
+from datetime import date
+from app.models.payout import PayoutRequest
+from app.schemas.payout import PayoutCreate, PayoutResponse
 
 router = APIRouter()
 
-# --- SCHEMAS ---
-class PayoutRequestCreate(BaseModel):
-    category: str      # Added to catch the dropdown value from React
-    amount: float
-    payout_method: str
-    reason: str
+@router.post("/payouts", response_model=PayoutResponse)
+def create_payout(payout_in: PayoutCreate, db: Session = Depends(get_db)):
+    
+    new_payout = PayoutRequest(**payout_in.model_dump())
+    db.add(new_payout)
+    db.flush() 
 
-class PayoutRequestOut(BaseModel):
-    id: int
-    category: str | None
-    amount: float
-    date: date | None
-    payout_method: str
-    reason: str
+    new_expense = models.Expense(
+        category="Director Payout",
+        description=f"Payout Request #{new_payout.id}: {payout_in.reason} ({payout_in.payout_method})",
+        amount=payout_in.amount,
+        expense_date=payout_in.date or date.today(),
+        approved_by="Pending Approval",
+        is_recurring=False,
+        status="Pending" 
+    )
+    db.add(new_expense)
+ 
+    db.commit()
+    db.refresh(new_payout)
+    return new_payout
 
-    class Config:
-        from_attributes = True
-
-class InvoiceOut(BaseModel):
-    id: int
-    entity: str | None
-    unit_number: str
-    category: str | None
-    amount: float
-    status: str
-    due_date: date
-
-    class Config:
-        from_attributes = True
-
-
-# --- ENDPOINTS ---
-@router.post("/payouts", status_code=201)
-def create_payout_request(payout: PayoutRequestCreate, db: Session = Depends(get_db)):
-    """Allows the Director to submit a new expense request."""
-    try:
-        db_payout = PayoutRequest(
-            category=payout.category,
-            amount=payout.amount,
-            payout_method=payout.payout_method,
-            reason=payout.reason,
-            date=date.today()  # Securely stamps the exact current date
-        )
-        db.add(db_payout)
-        db.commit()
-        db.refresh(db_payout)
-        return {
-            "status": "success", 
-            "message": "Expense created successfully", 
-            "data": db_payout
-        }
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/payouts", response_model=List[PayoutRequestOut])
-def get_all_payout_requests(db: Session = Depends(get_db)):
-    """Fetches every expense request so the Director can view them in a table."""
+@router.get("/payouts", response_model=list[PayoutResponse])
+def get_payouts(db: Session = Depends(get_db)):
     return db.query(PayoutRequest).all()
 
-@router.get("/invoices", response_model=List[InvoiceOut])
-def get_all_invoices(db: Session = Depends(get_db)):
-    """Fetches every invoice so the Director can see who has paid and who is due."""
-    return db.query(Invoice).all()
+@router.put("/{expense_id}")
+def update_expense(
+    expense_id: int, 
+    expense_in: schemas.ExpenseUpdate, # (Or whatever your schema is named)
+    db: Session = Depends(deps.get_db)
+):
+    expense = db.query(models.Expense).filter(models.Expense.id == expense_id).first()
+    if not expense:
+        raise HTTPException(status_code=404, detail="Expense record not found")
+    
+    # 1. Update the normal expense fields from the React form
+    for var, value in vars(expense_in).items():
+        if value is not None:
+            setattr(expense, var, value)
 
-@router.get("/summary")
-def get_summary(db: Session = Depends(get_db)):
-    """Calculates revenue from paid invoices and summarizes pending collections."""
-    
-    # Total Expenses (Money Out)
-    total_expenses = db.query(func.sum(PayoutRequest.amount)).scalar() or 0.0
-    
-    # Gross Revenue (Money In - ONLY Paid Invoices)
-    gross_revenue = db.query(
-        func.sum(Invoice.amount)
-    ).filter(Invoice.status == "paid").scalar() or 0.0
-    
-    # Invoice Status Counters
-    paid_count = db.query(Invoice).filter(Invoice.status == "paid").count()
-    due_count = db.query(Invoice).filter(Invoice.status == "due").count()
-    overdue_count = db.query(Invoice).filter(Invoice.status == "overdue").count()
-    
-    # Final Math
-    net_profit = gross_revenue - total_expenses
+    # ---------------------------------------------------------
+    # 🛠️ THE REVERSE BRIDGE: Sync back to the Payouts Table
+    # ---------------------------------------------------------
+    if expense.category == "Director Payout" and expense.status == "Paid":
+        # Look for our special tag in the description
+        if "Payout Request #" in expense.description:
+            try:
+                # Extract the ID number from the string (e.g., gets "1" from "Payout Request #1:")
+                payout_id_str = expense.description.split("Payout Request #")[1].split(":")[0]
+                payout_id = int(payout_id_str)
+                
+                # Reach across the database and update your friend's table!
+                linked_payout = db.query(PayoutRequest).filter(PayoutRequest.id == payout_id).first()
+                if linked_payout and linked_payout.status != "Paid":
+                    linked_payout.status = "Paid"
+                    db.add(linked_payout)
+            except Exception as e:
+                print(f"Failed to sync payout status: {e}") # Failsafe if description was manually re-typed
 
-    return {
-        "financials": {
-            "gross_revenue": gross_revenue,
-            "total_expenses": total_expenses,
-            "net_profit": net_profit,
-        },
-        "invoices_summary": {
-            "paid": paid_count,
-            "due": due_count,
-            "overdue": overdue_count
-        }
-    }
+    # ---------------------------------------------------------
+    
+    db.add(expense)
+    db.commit()
+    db.refresh(expense)
+    return expense

@@ -8,3 +8,11 @@ __pycache__/
 node_modules/
 dist/
 .DS_Store
+.parkview-env
+.env
+__pycache__
+.parkview-env/
+__pycache__/
+
+*.db
+.vscode/
