@@ -3,8 +3,10 @@ import {
   Building2, LayoutDashboard, ReceiptText, DollarSign, 
   Search, FileText, Plus, TrendingUp, X, CheckCircle2, 
   AlertTriangle, Eye, Printer, TrendingDown, Users, Briefcase, Lock,
-  PanelLeft, Clock, ChevronDown, ArrowUpRight, ArrowDownRight, LogOut
+  PanelLeft, Clock, ChevronDown, ArrowUpRight, ArrowDownRight, LogOut,
+  EyeOff, Loader2 
 } from 'lucide-react';
+import { API_BASE_URL } from './config.js';
 
 // --- ESTEBAN'S REPORT DATE ENGINE ---
 const PERIOD_OPTIONS = [
@@ -49,10 +51,14 @@ const getPresetDates = (period) => {
 export default function App() {
   // --- AUTHENTICATION STATE ---
   const [isAuthenticated, setIsAuthenticated] = useState(false);
-  // UPDATED: Replaced 'email' with 'username' to perfectly match your Pydantic LoginRequest schema
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [userRole, setUserRole] = useState(null);
   const [activeUser, setActiveUser] = useState("Director");
+  
+  // New Auth UI States mapped from Esteban's code
+  const [isLoginView, setIsLoginView] = useState(true);
+  const [showPassword, setShowPassword] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
 
   // --- NAVIGATION STATE ---
   const [currentView, setCurrentView] = useState('dashboard');
@@ -67,9 +73,6 @@ export default function App() {
   // --- GLOBAL DATA STATE ---
   const [dashboardData, setDashboardData] = useState(null);
   
-  const [payouts, setPayouts] = useState([]);
-  const [loadingPayouts, setLoadingPayouts] = useState(true);
-  
   const [invoices, setInvoices] = useState([]); 
   const [invoiceSummary, setInvoiceSummary] = useState(null);
   const [loadingInvoices, setLoadingInvoices] = useState(true);
@@ -79,13 +82,10 @@ export default function App() {
 
   // --- MODAL STATE ---
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
-  const [isPayoutModalOpen, setIsPayoutModalOpen] = useState(false);
   const [selectedInvoice, setSelectedInvoice] = useState(null); 
   const [searchTerm, setSearchTerm] = useState('');
   const [statusFilter, setStatusFilter] = useState('All Status');
   const [expenseCategoryFilter, setExpenseCategoryFilter] = useState('All Categories');
-  
-  const [formData, setFormData] = useState({ category: 'Director Payout', amount: '', payout_method: 'Bank Wire', reason: '' });
 
   // --- REPORT GENERATOR STATE ---
   const [loadingReport, setLoadingReport] = useState(false);
@@ -125,8 +125,19 @@ export default function App() {
     const options = { method, headers, cache: 'no-store' };
     if (body) options.body = JSON.stringify(body);
     
-    const res = await fetch(`http://127.0.0.1:8000/api/v1${endpoint}`, options);
-    if (!res.ok) throw new Error(await res.text());
+    const res = await fetch(`${API_BASE_URL}${endpoint}`, options);
+    
+    if (!res.ok) {
+      // Attempt to parse JSON error message from backend
+      let errorMsg = "Server error";
+      try {
+        const errorData = await res.json();
+        errorMsg = errorData.detail || errorMsg;
+      } catch (e) {
+        errorMsg = await res.text();
+      }
+      throw new Error(errorMsg);
+    }
     return res.json();
   };
 
@@ -134,10 +145,6 @@ export default function App() {
     try {
       const dashData = await fetchAPI(`/dashboard/main-summary?pl_period=${encodeURIComponent(plPeriod)}&exp_period=${encodeURIComponent(expPeriod)}&sales_period=${encodeURIComponent(salesPeriod)}&ar_period=${encodeURIComponent(arPeriod)}&ap_period=${encodeURIComponent(apPeriod)}`);
       setDashboardData(dashData);
-
-      const payData = await fetchAPI('/director/payouts');
-      setPayouts(payData);
-      setLoadingPayouts(false);
 
       const invData = await fetchAPI('/invoices/dashboard-summary');
       setInvoices(invData.invoices || []);
@@ -167,36 +174,47 @@ export default function App() {
   }, [isAuthenticated, loadAllData]);
 
   // --- FORM INPUT HANDLERS ---
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({
-      ...prev,
-      [name]: value
-    }));
-  };
-
   const handleStartDateChange = (e) => setReportStartDate(e.target.value);
   const handleEndDateChange = (e) => setReportEndDate(e.target.value);
 
   // --- AUTH HANDLERS ---
-  const handleLogin = async (e) => {
+  const handleAuthSubmit = async (e) => {
     e.preventDefault();
+    if (!loginForm.username.trim() || !loginForm.password.trim()) {
+      alert("Please enter both username and password");
+      return;
+    }
+
+    setAuthLoading(true);
     try {
-      // Connects precisely to the new login_for_access_token endpoint
-      const data = await fetchAPI('/login', 'POST', { 
-        username: loginForm.username, 
-        password: loginForm.password 
-      });
+      const endpoint = isLoginView ? "/login" : "/register";
       
-      if (data.access_token) { 
-        localStorage.setItem('parkview_token', data.access_token); 
-        localStorage.setItem('parkview_role', data.role);
-        localStorage.setItem('parkview_username', data.name);
-        setUserRole(data.role); 
-        setActiveUser(data.name);
-        setIsAuthenticated(true); 
+      // If registering, automatically assign the Director role for this portal
+      const payload = isLoginView 
+        ? { username: loginForm.username.trim(), password: loginForm.password.trim() }
+        : { username: loginForm.username.trim(), password: loginForm.password.trim(), role: "Director" };
+
+      const data = await fetchAPI(endpoint, 'POST', payload);
+      
+      if (isLoginView) {
+        if (data.access_token) { 
+          localStorage.setItem('parkview_token', data.access_token); 
+          localStorage.setItem('parkview_role', data.role);
+          localStorage.setItem('parkview_username', data.name || loginForm.username);
+          setUserRole(data.role); 
+          setActiveUser(data.name || loginForm.username);
+          setIsAuthenticated(true); 
+        }
+      } else {
+        alert("Account created successfully! Please sign in.");
+        setIsLoginView(true); // Switch to login view
+        setLoginForm({ ...loginForm, password: '' }); // Clear password for security
       }
-    } catch (error) { alert("Invalid credentials or server offline. Please check your username and password."); }
+    } catch (error) { 
+      alert(error.message || "Invalid credentials or server offline. Please check your username and password."); 
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const handleLogout = () => {
@@ -206,23 +224,6 @@ export default function App() {
     setIsAuthenticated(false);
     setCurrentView('dashboard');
     setLoginForm({ username: '', password: '' });
-  };
-
-  // --- PAYOUT HANDLER (The ONLY Write Operation Allowed for Director) ---
-  const handlePayoutSubmit = async (e) => {
-    e.preventDefault();
-    try {
-      await fetchAPI('/director/payouts', 'POST', { 
-        category: formData.category, 
-        amount: parseFloat(formData.amount || 0), 
-        payout_method: formData.payout_method, 
-        reason: formData.reason 
-      });
-      loadAllData(); 
-      setIsPayoutModalOpen(false);
-      setFormData({ category: 'Director Payout', amount: '', payout_method: 'Bank Wire', reason: '' });
-      alert("Payout Request successfully recorded.");
-    } catch (error) { alert("Failed to submit request."); }
   };
 
   // --- REPORT GENERATOR ---
@@ -242,7 +243,7 @@ export default function App() {
     e.preventDefault();
     setLoadingReport(true);
     try {
-      let url = `http://127.0.0.1:8000/api/v1/reports/generate?type=${encodeURIComponent(reportType)}&accounting_method=${accountingMethod}`;
+      let url = `${API_BASE_URL}/reports/generate?type=${encodeURIComponent(reportType)}&accounting_method=${accountingMethod}`;
       
       if (reportEndDate) url += `&end_date=${reportEndDate}`;
       if (reportType !== "AR Ageing Summary" && reportStartDate) {
@@ -292,19 +293,44 @@ export default function App() {
           <div className="p-8 pb-6 text-center border-b border-gray-100">
             <img src="/logo.png" alt="Park View Mall Logo" className="w-16 h-16 mx-auto mb-4 object-contain" onError={(e) => { e.target.onerror = null; e.target.src = "https://ui-avatars.com/api/?name=PV&background=3b82f6&color=fff&rounded=true&bold=true&size=128"; }} />
             <h2 className="text-2xl font-bold text-gray-900 tracking-tight">Director Portal</h2>
-            <p className="text-sm text-gray-500 mt-1">Park View Mall ERP</p>
+            <p className="text-sm text-gray-500 mt-1">{isLoginView ? "Sign in to access your dashboard" : "Register a new Director account"}</p>
           </div>
-          <form onSubmit={handleLogin} className="p-8 space-y-6">
+          <form onSubmit={handleAuthSubmit} className="p-8 space-y-6">
             <div>
               <label className="block text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">Username</label>
-              <input type="text" required value={loginForm.username} onChange={(e) => setLoginForm({...loginForm, username: e.target.value})} placeholder="e.g. director_jm" className="w-full border border-gray-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500/20 bg-gray-50 focus:bg-white" />
+              <input type="text" required value={loginForm.username} onChange={(e) => setLoginForm({...loginForm, username: e.target.value})} placeholder="e.g. director_jm" disabled={authLoading} className="w-full border border-gray-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500/20 bg-gray-50 focus:bg-white" />
             </div>
             <div>
               <label className="block text-xs font-semibold text-gray-600 mb-2 uppercase tracking-wide">Password</label>
-              <input type="password" required value={loginForm.password} onChange={(e) => setLoginForm({...loginForm, password: e.target.value})} placeholder="••••••••" className="w-full border border-gray-200 rounded-lg px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500/20 bg-gray-50 focus:bg-white" />
+              <div className="relative">
+                <input type={showPassword ? "text" : "password"} required value={loginForm.password} onChange={(e) => setLoginForm({...loginForm, password: e.target.value})} placeholder="••••••••" disabled={authLoading} className="w-full border border-gray-200 rounded-lg pl-4 pr-12 py-3 text-sm focus:ring-2 focus:ring-blue-500/20 bg-gray-50 focus:bg-white" />
+                <button type="button" onClick={() => setShowPassword(!showPassword)} disabled={authLoading} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-700 cursor-pointer">
+                  {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+                </button>
+              </div>
             </div>
-            {/* Note: Purposely omitting any registration links to maintain strict access control */}
-            <button type="submit" className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-3 rounded-lg text-sm font-semibold hover:bg-blue-700 shadow-md cursor-pointer"><Lock className="w-4 h-4" /> Secure Sign In</button>
+            <button type="submit" disabled={authLoading} className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-3 rounded-lg text-sm font-semibold hover:bg-blue-700 shadow-md transition-all duration-200 cursor-pointer disabled:bg-blue-400">
+              {authLoading ? (
+                <><Loader2 className="w-4 h-4 animate-spin" /> {isLoginView ? "Signing In..." : "Registering..."}</>
+              ) : (
+                <><Lock className="w-4 h-4" /> {isLoginView ? "Secure Sign In" : "Register Account"}</>
+              )}
+            </button>
+            
+            {/* TOGGLE BUTTON */}
+            <div className="mt-6 text-center text-sm text-gray-600 border-t border-gray-100 pt-6">
+              {isLoginView ? "Need Director access? " : "Already have an account? "}
+              <button
+                type="button"
+                onClick={() => {
+                  setIsLoginView(!isLoginView);
+                  setLoginForm({...loginForm, password: ''}); 
+                }}
+                className="text-blue-600 hover:text-blue-800 font-semibold cursor-pointer"
+              >
+                {isLoginView ? "Register here" : "Sign in here"}
+              </button>
+            </div>
           </form>
         </div>
       </div>
@@ -337,10 +363,6 @@ export default function App() {
     const y = chartHeight - paddingY - ((d.amount / yAxisMax) * (chartHeight - paddingY * 2));
     return `${x},${y}`;
   }).join(" ");
-
-  const pendingPayoutsCount = payouts.filter(p => p?.status === 'Pending').length;
-  const approvedPayoutsCount = payouts.filter(p => p?.status === 'Approved').length; 
-  const paidPayoutsSum = payouts.filter(p => p?.status === 'Paid').reduce((sum, p) => sum + (p?.amount || 0), 0);
 
   return (
     <div className="flex h-screen bg-[#f8fafc] font-sans text-sm antialiased relative">
@@ -461,7 +483,6 @@ export default function App() {
                   <div className="flex justify-between items-center mb-6">
                     <h2 className="text-2xl font-bold text-slate-900">Business at a glance</h2>
                     <div className="flex gap-3">
-                      <button onClick={() => setIsPayoutModalOpen(true)} className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-lg font-medium shadow text-sm flex items-center gap-2 transition-colors cursor-pointer"><Plus size={16}/> Request Payout</button>
                       <button onClick={() => setIsReportModalOpen(true)} className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium shadow text-sm flex items-center gap-2 transition-colors cursor-pointer"><FileText size={16}/> Generate Report</button>
                     </div>
                   </div>
@@ -612,38 +633,6 @@ export default function App() {
                           </div>
                         </div>
                       </div>
-
-                      {/* THE RESTORED PAYOUT MANAGER MATRIX */}
-                      <div className="mt-6 bg-white rounded-xl border border-gray-200 shadow-sm p-6">
-                        <div className="flex justify-between items-center mb-6">
-                          <div className="flex items-start gap-3">
-                            <FileText className="w-5 h-5 text-gray-500 mt-1" />
-                            <div><h3 className="text-lg font-bold text-gray-900">Payout Requests</h3><p className="text-xs text-gray-500 mt-0.5">Track and post distribution pipelines.</p></div>
-                          </div>
-                          <button onClick={() => setIsPayoutModalOpen(true)} className="inline-flex items-center bg-[#2563eb] text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer"><Plus className="w-4 h-4 mr-1.5" /> New Request</button>
-                        </div>
-                        <div className="grid grid-cols-3 gap-4 mb-6">
-                           <div className="border border-gray-200 rounded-xl p-4"><div className="flex items-center gap-1.5 text-gray-500 text-[13px] mb-2"><Clock className="w-3.5 h-3.5" /> Pending</div><div className="text-xl font-bold text-gray-900">{pendingPayoutsCount}</div></div>
-                           <div className="border border-gray-200 rounded-xl p-4"><div className="flex items-center gap-1.5 text-gray-500 text-[13px] mb-2"><CheckCircle2 className="w-3.5 h-3.5" /> Approved</div><div className="text-xl font-bold text-gray-900">{approvedPayoutsCount}</div></div>
-                           <div className="border border-gray-200 rounded-xl p-4"><div className="text-gray-500 text-[13px] mb-2">Paid (history)</div><div className="text-xl font-bold text-gray-900">KES {paidPayoutsSum.toLocaleString()}</div></div>
-                        </div>
-                        <div className="overflow-x-auto border border-gray-100 rounded-lg">
-                          <table className="w-full text-left text-sm border-collapse">
-                            <thead className="bg-gray-50 border-b border-gray-200 text-gray-500"><tr><th className="py-3 px-4 font-medium">Ref</th><th className="py-3 px-4 font-medium">Date</th><th className="py-3 px-4 font-medium">Amount</th><th className="py-3 px-4 font-medium">Method</th><th className="py-3 px-4 text-right">Status</th></tr></thead>
-                            <tbody className="divide-y divide-gray-100 text-gray-700">
-                              {loadingPayouts ? ( <tr><td colSpan="5" className="py-8 text-center text-gray-400">Loading pipelines...</td></tr> ) : payouts.length === 0 ? ( <tr><td colSpan="5" className="py-8 text-center text-gray-400 bg-gray-50/40">No entries in runtime stack.</td></tr> ) : [...payouts].reverse().slice(0, 5).map((row) => (
-                                <tr key={row.id} className="hover:bg-slate-50/50">
-                                  <td className="py-3 px-4 font-medium text-gray-900">#PR-{row.id.toString().padStart(3, '0')}</td>
-                                  <td className="py-3 px-4 text-gray-500">{row.date || row.created_at || row.request_date || "Just now"}</td>
-                                  <td className="py-3 px-4 font-semibold text-gray-900">KES {row.amount.toLocaleString()}</td>
-                                  <td className="py-3 px-4 text-gray-600">{row.payout_method}</td>
-                                  <td className="py-3 px-4 text-right">{renderStatusBadge(row.status)}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
                     </>
                   )}
                 </>
@@ -761,7 +750,7 @@ export default function App() {
                       <div className="w-10 h-10 bg-blue-50 text-blue-600 rounded-lg flex items-center justify-center"><Briefcase className="w-5 h-5" /></div>
                     </div>
                     <div className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm flex items-start justify-between">
-                      <div><p className="text-sm text-gray-500 mb-1">Director Payouts</p><h3 className="text-2xl font-bold text-gray-900 tracking-tight">KES {expenseSummary.director_payouts.toLocaleString()}</h3></div>
+                      <div><p className="text-sm text-gray-500 mb-1">Director Payouts</p><h3 className="text-2xl font-bold text-gray-900 tracking-tight">KES {(expenseSummary.director_payouts || 0).toLocaleString()}</h3></div>
                       <div className="w-10 h-10 bg-blue-50 text-blue-600 rounded-lg flex items-center justify-center"><DollarSign className="w-5 h-5" /></div>
                     </div>
                   </div>
@@ -858,48 +847,7 @@ export default function App() {
         </div>
       )}
 
-      {/* 2. PAYOUT REQUEST MODAL (Only CRUD Allowed) */}
-      {isPayoutModalOpen && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in-95 duration-200">
-            <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
-              <h3 className="font-bold text-gray-900">Create Payout Request</h3>
-              <button onClick={() => setIsPayoutModalOpen(false)} className="text-gray-400 hover:text-gray-600 bg-gray-100 p-1 rounded-lg cursor-pointer"><X className="w-5 h-5" /></button>
-            </div>
-            <form onSubmit={handlePayoutSubmit} className="p-6 space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">Category</label>
-                <select name="category" value={formData.category} onChange={handleChange} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-gray-50 outline-none cursor-pointer">
-                  <option value="Director Payout">Director Payout</option><option value="Salary">Salary Advance</option><option value="Legal">Legal Retainer</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">Amount (KES)</label>
-                <div className="relative">
-                  <span className="absolute left-3 top-2.5 text-gray-400 font-medium text-sm">KES</span>
-                  <input type="number" name="amount" value={formData.amount} onChange={handleChange} placeholder="0.00" required className="w-full border border-gray-200 rounded-lg pl-12 pr-3 py-2.5 text-sm bg-gray-50 focus:bg-white focus:outline-none" />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">Payout Method</label>
-                <select name="payout_method" value={formData.payout_method} onChange={handleChange} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-gray-50 outline-none cursor-pointer">
-                  <option value="Bank Wire">Bank Wire</option><option value="Bank Transfer">Bank Transfer</option><option value="Cheque">Cheque</option><option value="Mobile Money">Mobile Money (M-Pesa)</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-gray-600 mb-1.5 uppercase tracking-wide">Reason / Description</label>
-                <textarea name="reason" value={formData.reason} onChange={handleChange} rows="3" required placeholder="E.g., Monthly performance bonus..." className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-gray-50 focus:bg-white resize-none outline-none"></textarea>
-              </div>
-              <div className="pt-4 flex gap-3">
-                <button type="button" onClick={() => setIsPayoutModalOpen(false)} className="flex-1 px-4 py-2.5 border border-gray-200 text-gray-600 rounded-lg text-sm font-semibold hover:bg-gray-50 cursor-pointer">Cancel</button>
-                <button type="submit" className="flex-1 px-4 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 cursor-pointer">Submit Request</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* 3. INVOICE PREVIEW MODAL */}
+      {/* 2. INVOICE PREVIEW MODAL */}
       {selectedInvoice && (
         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
           <div className="bg-[#f8fafc] rounded-xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in-95 duration-200">
